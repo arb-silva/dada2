@@ -175,6 +175,9 @@ mapHits <- function(x, refs, keep, sep="/") {
 matchGenera <- function(gen.tax, gen.binom, split.glyph="/") {
   if(is.na(gen.tax) || is.na(gen.binom)) { return(FALSE) }
   if(nchar(gen.tax) == 0 || nchar(gen.binom) == 0) { return(FALSE) }
+  # Handle SILVA 144-style genus suffixes like "Enterobacter--other"
+  gen.tax <- gsub("--other$", "", gen.tax)
+  gen.binom <- gsub("--other$", "", gen.binom)
   if((gen.tax==gen.binom) || 
      grepl(paste0("^", gen.binom, "[ _", split.glyph, "]"), gen.tax) || 
      grepl(paste0(split.glyph, gen.binom, "$"), gen.tax)) {
