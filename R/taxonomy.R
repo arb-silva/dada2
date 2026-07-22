@@ -511,7 +511,7 @@ makeSpeciesFasta_RDP <- function(fin, fout, compress=TRUE) {
 }
 
 #' This function creates the dada2 assignTaxonomy training fasta for the official Silva NR99
-#' release files. If `include.species`=TRUE, a 7th taxonomic level (species) will be added based on the
+#' release files. If `include.species`=TRUE, a 7/8th taxonomic level (species) will be added based on the
 #' Genus species binomial in the Silva taxonomy string (if consistent with the genus assignment).
 #' 
 #' ## Silva release v138.2
@@ -532,7 +532,7 @@ makeSpeciesFasta_RDP <- function(fin, fout, compress=TRUE) {
 #' @importFrom Biostrings BStringSet
 #' @importFrom utils read.table
 #' @keywords internal
-makeTaxonomyFasta_SilvaNR <- function(fin, ftax, fout, include.species=FALSE, compress=TRUE) {
+makeTaxonomyFasta_SilvaNR <- function(fin, ftax, fout, genus.position=6, include.species=FALSE, compress=TRUE) {
   xset <- DNAStringSet(readRNAStringSet(fin, format="fasta"))
   # taxl: The taxonmic strings or (l)ines associated with each entry. Named by the sequence ID/accession.
   taxl <- names(xset)
@@ -549,24 +549,30 @@ makeTaxonomyFasta_SilvaNR <- function(fin, ftax, fout, include.species=FALSE, co
   kingdom <- sapply(strsplit(taxl, ";"), `[`, 1)
   taxl.ba <- taxl[kingdom %in% c("Bacteria", "Archaea")]
   taxa.ba <- taxa[names(taxl.ba)]
-  # Create 6-column matrix with Silva taxonomic assignment for each sequence at each level from Kingdom to Genus (NA if no assignment)
-  taxa.ba.mat <- matrix(sapply(taxa.ba, function(flds) {
-    c(flds[1], flds[2], flds[3], flds[4], flds[5], flds[6])
-  }), ncol=6, byrow=TRUE)
+  # Create a matrix with one column for each taxonomic rank from the first field
+  # through the genus rank. This is 6 columns for older SILVA files and 7 for
+  # SILVA 144+ where an extra prokaryotic kingdom rank is inserted.
+  taxa.ba.mat <- matrix(NA_character_, nrow=length(taxa.ba), ncol=genus.position)
+  for(i in seq_along(taxa.ba)) {
+    flds <- taxa.ba[[i]]
+    n <- min(length(flds), genus.position)
+    taxa.ba.mat[i, seq_len(n)] <- flds[seq_len(n)]
+  }
   rownames(taxa.ba.mat) <- names(taxl.ba)
-  # Create 6-column matrix with full Silva taxonomic string at each level for each sequence, from Kingdom to Genus
-  # Strings will include NA levels if no assignment at that level, e.g. Bacteria;Firmicutes;NA;NA
+  # Create a matrix with full Silva taxonomic string at each level for each sequence,
+  # from the first level through the genus level. Strings will include NA levels if
+  # no assignment at that level, e.g. Bacteria;Firmicutes;NA;NA
   taxa.ba.mat.string <- matrix("UNDEF", nrow=nrow(taxa.ba.mat), ncol=ncol(taxa.ba.mat))
   rownames(taxa.ba.mat.string) <- names(taxl.ba)
   taxa.ba.mat.string[,1] <- paste0(taxa.ba.mat[,1],";")
-  for(col in seq(2,6)) {
+  for(col in seq(2,ncol(taxa.ba.mat))) {
     taxa.ba.mat.string[,col] <- paste0(taxa.ba.mat.string[,col-1], taxa.ba.mat[,col],";")
   }
   if(any(taxa.ba.mat.string == "UNDEF")) stop("Taxon string matrix was not fully initialized.")
 
   ##### SILVA 138_2 CLEANUP NO LONGER NEEDS THIS BLOCK, DEPRECATING IN COMMENTS FOR NOW, SHOULD REMOVE LATER
   # Define the set of valid taxonomic assignment by their appearance in the list of valid Silva taxonomic levels
-  taxa.ba.mat.is_valid <- matrix(taxa.ba.mat.string %in% silva.taxa$Taxon, ncol=6)
+  taxa.ba.mat.is_valid <- matrix(taxa.ba.mat.string %in% silva.taxa$Taxon, ncol=ncol(taxa.ba.mat))
   # Update taxa.ba.mat matrix by replacing invalid entries with NAs
   taxa.ba.mat[!taxa.ba.mat.is_valid] <- NA
   # Also replace "uncultured" taxonomic ranks with NAs (note, uncultured only shows up as the terminal "assigned" rank)
@@ -581,30 +587,27 @@ makeTaxonomyFasta_SilvaNR <- function(fin, ftax, fout, include.species=FALSE, co
   taxa.ba.mat.is_incertae <- matrix(taxa.ba.mat %in% "Incertae Sedis", ncol=ncol(taxa.ba.mat))
   # Define make_na as TRUE when rank is "Incertae Sedis" and all lower ranks are also "Incertae Sedis"
   taxa.ba.mat.make_na <- taxa.ba.mat.is_incertae
-  for(col in seq(6,2)) {
+  for(col in seq(ncol(taxa.ba.mat),2)) {
     taxa.ba.mat.make_na[,col-1] <- taxa.ba.mat.make_na[,col-1] & taxa.ba.mat.make_na[,col]
   }
   taxa.ba.mat[taxa.ba.mat.make_na] <- NA
   #####
   
   ######### ADD SPECIES PART HERE ##############
+  species.col <- genus.position + 1
   if(include.species) {
-    # Add the 7th column, which will be the species column
+    # Add a species column after the genus rank.
     taxa.ba.mat <- cbind(taxa.ba.mat, 
-                         matrix(sapply(taxa.ba, `[`, 7), ncol=1, byrow=TRUE))
+                         matrix(sapply(taxa.ba, `[`, species.col), ncol=1, byrow=TRUE))
     # Get validated genus from the matrix
-    genus <- taxa.ba.mat[,6]
+    genus <- taxa.ba.mat[, species.col - 1]
     genus <- gsub("Candidatus ", "", genus)
     genus <- gsub("\\[", "", genus)
     genus <- gsub("\\]", "", genus)
-    # Get the "binomial" string from the 7th field in the Silva taxonomic annotation
-    # The "binomial" field is not curated like the other Silva taxonomic levels, and can have varying info
-    # We assume that the first two words are the Genus species binomial, when there is a valid one in the field
-    # NOTE: the binomial is actually not always in the 7th field, so this isn't strictly correct.
-    # the binomial is in the "last" field, which may be <7 when not all the levels down to genus are assigned.
-    # But we are throwing away everything that doesn't match the genus anyway, so that case
-    # doesn't need to be handled correctly here.
-    binom <- taxa.ba.mat[,7]
+    # Get the species binomial string from the species column in the matrix.
+    # The binomial field is not curated like the other Silva taxonomic levels, and can have varying info.
+    # We assume that the first two words are the Genus species binomial, when there is a valid one in the field.
+    binom <- taxa.ba.mat[, species.col]
     binom <- gsub("Candidatus ", "", binom)
     binom <- gsub("\\[", "", binom)
     binom <- gsub("\\]", "", binom)
@@ -622,7 +625,7 @@ makeTaxonomyFasta_SilvaNR <- function(fin, ftax, fout, include.species=FALSE, co
     # Define the "valid" species, and set invalid species to NA in the taxonomic matrix
     valid.spec <- gen.match & !is.NA & !is.sp & !is.endo & !is.uncult & !is.unident
     binom[!valid.spec,2] <- NA
-    taxa.ba.mat[,7] <- binom[,2]
+    taxa.ba.mat[, species.col] <- binom[,2]
   }
   # Organize a small number of Eukaryota sequences for outgroup purposes, keeping only the Eukaryota Kingdom taxonomic assignment
   set.seed(500); N_EUK <- 500
@@ -648,7 +651,7 @@ makeTaxonomyFasta_SilvaNR <- function(fin, ftax, fout, include.species=FALSE, co
   ## Add some verbose output describing what happened.
   cat(length(xset.out), "reference sequences were output.\n")
   print(table(taxa.mat.final[,1], useNA="ifany"))
-  if(include.species) cat(sum(!is.na(taxa.mat.final[,7])), "entries include species names.\n")
+  if(include.species) cat(sum(!is.na(taxa.mat.final[, species.col])), "entries include species names.\n")
   
   writeFasta(ShortRead(unname(xset.out), BStringSet(taxa.string.final)), fout,
              width=20000L, compress=compress)
@@ -670,7 +673,7 @@ makeTaxonomyFasta_SilvaNR <- function(fin, ftax, fout, include.species=FALSE, co
 #' @importFrom Biostrings DNAStringSet
 #' @importFrom Biostrings readRNAStringSet
 #' @keywords internal
-makeSpeciesFasta_Silva <- function(fin, fout, compress=TRUE) {
+makeSpeciesFasta_Silva <- function(fin, fout, genus.position=6, compress=TRUE) {
   # Read in and remove records not assigned to species and non-bacteria
   xset <- DNAStringSet(readRNAStringSet(fin, format="fasta"))
   is.bact <- grepl("Bacteria;", names(xset), fixed=TRUE)
@@ -679,13 +682,13 @@ makeSpeciesFasta_Silva <- function(fin, fout, compress=TRUE) {
   xset <- xset[!is.uncult]
   is.unident <- grepl("[Uu]nidentified", names(xset))
   xset <- xset[!is.unident]
-  is.complete <- sapply(strsplit(as.character(names(xset)), ";"), length)==7
+  is.complete <- sapply(strsplit(as.character(names(xset)), ";"), length)== genus.position + 1
   xset <- xset[is.complete]
   
   # Pull out binomial strings
   tax <- strsplit(as.character(names(xset)), ";") ###!
-  genus <- sapply(tax, `[`, 6) ###!
-  binom <- sapply(tax, `[`, 7) ###!
+  genus <- sapply(tax, `[`, genus.position) ###!
+  binom <- sapply(tax, `[`, genus.position + 1) ###!
   
   # Remove parens/brackets, which do not seem to be evenly used in the formal taxonomy and the binomial
   # ...and that mess up the `matchGenera` regex
